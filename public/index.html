@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>MSCI Capture – Proposal Extractor</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #f0f4f8; font-family: system-ui, sans-serif; }
+    @keyframes bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(-6px)} }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef } = React;
+
+    const CATEGORIES = [
+      "No Value","Advisory Vote Frequency","Advisory Vote on Executive Compensation",
+      "Advisory Vote on Golden Parachute","Amend Certificate of Incorporation","Asset Sale Votes",
+      "Auditor Ratification","Auditor Remuneration","Board Classification","Board Declassification",
+      "Board Elections – Shareholder Nominations","Board Size","Board Vacancy",
+      "Business Combination Provision","By-Law Amendment","By-Law Amendment Voting Threshold",
+      "CEO Compensation","Charter Amendment Voting Threshold","Confidential Voting",
+      "Control Share Acquisition Provision","Cumulative Voting - Adopt","Cumulative Voting - Repeal",
+      "Director Compensation","Director & Employee Comp","Director & Exec Comp","Director Removal",
+      "Discharge Directors (slate)","Elect Directors (slate)","Election of Chairman",
+      "Election of Vice Chairman","Electronic Voting","Employee Compensation",
+      "ESOP, ESPP or Pension Fund","Executive Compensation","Executive Severance","Expense Options",
+      "Fair Price Provision","Increase Authorized Shares","Majority Vote-Directors","Merger Votes",
+      "Name Change","Other","Poison Pill","Recapitalization","Reincorporation",
+      "Restatement of the Certificate of Incorporation","Restricted Stock","Reverse Stock Split",
+      "Simple Majority Vote for Merger","Special Meetings","Shareholder Voting or Ownership Restrictions",
+      "Stock Issuance","Stock Option Exchange","Supermajority Vote Elimination","Voting Rights",
+      "Written Consent Provisions","Remuneration Policy: Remuneration Policy - Binding",
+      "Remuneration Policy: Remuneration Policy - Advisory",
+      "Remuneration Policy (Individual Component): Merger-Related Compensation - Advisory",
+      "Remuneration Policy (Individual Component): LTIP - Approve or Amend Plan Rules - Binding",
+      "Remuneration Policy (Individual Component): LTIP - Authorize Dilution - binding",
+      "Remuneration Policy (Individual Component): Bonus - Approve Metrics",
+      "Remuneration Policy (Individual Component): Pension",
+      "Remuneration Policy (Individual Component): Non-Complete Clause Terms",
+      "Remuneration Policy (Individual Component): Severance Change in Control - Advisory",
+      "Remuneration Policy (Individual Component): Severance Arrangements",
+      "Remuneration Report (Policy & Totals In One Vote): Remuneration of Executives - Advisory",
+      "Remuneration Report (Policy & Totals In One Vote): Remuneration Report - Advisory",
+      "Remuneration paid (Total): Total Pay for Individual for Past Year - Advisory",
+      "Remuneration paid (Component): Authorise LTIP / Option Grant",
+      "Remuneration paid (Component):Bonus - Approve Amounts",
+      "Remuneration paid (Component): Golden Hello - Approve Amount",
+      "Remuneration paid (Component): Severance - Approve Amount",
+      "Non-executive director pay: Director (NED) Compensation"
+    ];
+
+    const SYSTEM_PROMPT = `You are an expert proxy voting analyst for MSCI. You are reading shareholder meeting filings (SEC, LSE, NSE, or any exchange).
+
+Your job:
+1. Find EVERY proposal, agenda item, or resolution in the document.
+2. Copy the heading/title EXACTLY as it appears in the document — preserve original capitalization, punctuation, and wording. Do not paraphrase, shorten, or rewrite it in any way.
+3. Map each heading to the best category from this list:
+${CATEGORIES.map((c, i) => `${i}. ${c}`).join("\n")}
+
+Respond ONLY with a valid JSON array. No markdown fences, no extra text. Format:
+[
+  {
+    "number": "proposal number as in document, or — if none",
+    "heading": "EXACT heading text copied from the document, character for character",
+    "category": "Exact category string from the list",
+    "confidence": "High" or "Medium" or "Low",
+    "reason": "One short sentence"
+  }
+]
+
+CRITICAL: The heading field must be the verbatim text from the document. Members will copy this text directly into MSCI Capture software. Any paraphrasing will cause data errors.`;
+
+    function App() {
+      const [status, setStatus]     = useState("idle");
+      const [results, setResults]   = useState([]);
+      const [fileName, setFileName] = useState("");
+      const [errorMsg, setErrorMsg] = useState("");
+      const [copied, setCopied]     = useState(null);
+      const fileRef = useRef();
+
+      const confBadge = c => ({
+        High:   ["#dcfce7","#16a34a"],
+        Medium: ["#fef9c3","#b45309"],
+        Low:    ["#fee2e2","#dc2626"]
+      }[c] || ["#f1f5f9","#64748b"]);
+
+      const processFile = async (file) => {
+        setFileName(file.name);
+        setStatus("loading");
+        setResults([]);
+        setErrorMsg("");
+
+        try {
+          let messages;
+          if (file.type === "application/pdf") {
+            const base64 = await new Promise((res, rej) => {
+              const r = new FileReader();
+              r.onload = () => res(r.result.split(",")[1]);
+              r.onerror = () => rej();
+              r.readAsDataURL(file);
+            });
+            messages = [{
+              role: "user",
+              content: [
+                { type: "document", source: { type: "base64", media_type: "application/pdf", data: base64 } },
+                { type: "text", text: "Extract every proposal from this filing with its EXACT heading and categorize it." }
+              ]
+            }];
+          } else {
+            const text = await file.text();
+            messages = [{
+              role: "user",
+              content: `Extract every proposal from this filing with its EXACT heading and categorize it:\n\n${text.slice(0, 14000)}`
+            }];
+          }
+
+          // Calls our own server — API key is hidden server-side
+          const res = await fetch("/api/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 1000,
+              system: SYSTEM_PROMPT,
+              messages
+            })
+          });
+          const data = await res.json();
+          const raw  = data.content?.find(b => b.type === "text")?.text || "[]";
+          setResults(JSON.parse(raw.replace(/```json|```/g, "").trim()));
+          setStatus("done");
+        } catch {
+          setErrorMsg("Could not process the file. Please try a PDF, TXT, or HTML file.");
+          setStatus("error");
+        }
+        fileRef.current.value = "";
+      };
+
+      const handleFile = e => { if (e.target.files[0]) processFile(e.target.files[0]); };
+      const handleDrop = e => { e.preventDefault(); if (e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]); };
+
+      const copyHeading = (heading, idx) => {
+        navigator.clipboard.writeText(heading);
+        setCopied(idx);
+        setTimeout(() => setCopied(null), 1800);
+      };
+
+      const copyCSV = () => {
+        const lines = ["Proposal #,Exact Heading,Category,Confidence",
+          ...results.map(r => `"${r.number}","${r.heading}","${r.category}","${r.confidence}"`)];
+        navigator.clipboard.writeText(lines.join("\n"));
+      };
+
+      return (
+        <div style={{ fontFamily:"system-ui,sans-serif", background:"#f0f4f8", minHeight:"100vh" }}>
+          <div style={{ background:"linear-gradient(135deg,#1e3a5f,#2563eb)", color:"#fff", padding:"15px 24px", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+            <div>
+              <div style={{ fontWeight:700, fontSize:17 }}>🗳️ MSCI Capture – Proposal Extractor</div>
+              <div style={{ fontSize:12, opacity:0.8, marginTop:2 }}>Upload filing → get exact headings + category → copy into Capture</div>
+            </div>
+            {status === "done" && (
+              <button onClick={copyCSV} style={{ background:"rgba(255,255,255,0.15)", border:"1px solid rgba(255,255,255,0.3)", color:"#fff", borderRadius:8, padding:"7px 14px", cursor:"pointer", fontSize:12, fontWeight:600 }}>
+                ⬇️ Export CSV
+              </button>
+            )}
+          </div>
+
+          <div style={{ maxWidth:900, margin:"0 auto", padding:"24px 16px" }}>
+            {status !== "done" && (
+              <div onClick={() => fileRef.current.click()} onDrop={handleDrop} onDragOver={e => e.preventDefault()}
+                style={{ background:"#fff", border:"2px dashed #93c5fd", borderRadius:16, padding:"48px 24px", textAlign:"center", cursor:"pointer" }}>
+                <div style={{ fontSize:52 }}>📂</div>
+                <div style={{ fontWeight:700, fontSize:16, color:"#1e3a5f", marginTop:10 }}>
+                  {status === "loading" ? `Reading "${fileName}"…` : "Click or drag & drop your filing here"}
+                </div>
+                <div style={{ fontSize:13, color:"#64748b", marginTop:6 }}>
+                  {status === "loading" ? "Extracting proposals and matching categories…" : "PDF · TXT · HTML — SEC DEF 14A · Proxy Statement · Annual Report · Any Exchange Filing"}
+                </div>
+                {status === "loading" && (
+                  <div style={{ marginTop:18, display:"flex", justifyContent:"center", gap:6 }}>
+                    {[0,1,2].map(i => <div key={i} style={{ width:10, height:10, borderRadius:"50%", background:"#2563eb", animation:`bounce 1s infinite ${i*0.2}s` }} />)}
+                  </div>
+                )}
+                <input ref={fileRef} type="file" accept=".pdf,.txt,.html,.htm" style={{ display:"none" }} onChange={handleFile} />
+              </div>
+            )}
+
+            {status === "error" && (
+              <div style={{ marginTop:16, background:"#fef2f2", border:"1px solid #fca5a5", borderRadius:10, padding:14, color:"#dc2626", fontSize:13 }}>
+                ⚠️ {errorMsg}
+              </div>
+            )}
+
+            {status === "done" && (
+              <>
+                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14, flexWrap:"wrap", gap:10 }}>
+                  <div>
+                    <span style={{ fontWeight:700, fontSize:15, color:"#1e293b" }}>✅ {results.length} proposals extracted from "{fileName}"</span>
+                    <span style={{ marginLeft:10, fontSize:13, color:"#64748b" }}>
+                      {results.filter(r=>r.confidence==="High").length} High · {results.filter(r=>r.confidence==="Medium").length} Medium · {results.filter(r=>r.confidence==="Low").length} Low
+                    </span>
+                  </div>
+                  <button onClick={() => { setStatus("idle"); setResults([]); setFileName(""); }}
+                    style={{ background:"#f1f5f9", border:"1px solid #cbd5e1", color:"#475569", borderRadius:8, padding:"7px 14px", cursor:"pointer", fontSize:13 }}>
+                    📂 Upload New File
+                  </button>
+                </div>
+
+                <div style={{ background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:10, padding:"10px 16px", marginBottom:14, fontSize:13, color:"#1d4ed8" }}>
+                  💡 <strong>How to use:</strong> Click <strong>📋 Copy</strong> next to any heading → paste into MSCI Capture → select the shown category.
+                </div>
+
+                <div style={{ background:"#fff", borderRadius:14, overflow:"hidden", boxShadow:"0 2px 8px rgba(0,0,0,0.08)" }}>
+                  <table style={{ width:"100%", borderCollapse:"collapse", fontSize:13 }}>
+                    <thead>
+                      <tr style={{ background:"#1e3a5f", color:"#fff" }}>
+                        {["#","Exact Proposal Heading (from document)","Category for Capture","Conf.","Copy"].map(h => (
+                          <th key={h} style={{ padding:"11px 14px", textAlign:"left", fontWeight:600, fontSize:12, whiteSpace:"nowrap" }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {results.map((r, i) => (
+                        <tr key={i} style={{ borderBottom:"1px solid #f1f5f9", background:i%2===0?"#fff":"#f8fafc" }}>
+                          <td style={{ padding:"10px 14px", color:"#94a3b8", fontWeight:700, verticalAlign:"top" }}>{r.number}</td>
+                          <td style={{ padding:"10px 14px", verticalAlign:"top", maxWidth:320 }}>
+                            <span style={{ fontFamily:"monospace", fontSize:13, background:"#f8fafc", border:"1px solid #e2e8f0", borderRadius:6, padding:"2px 7px", display:"inline-block", lineHeight:1.6 }}>
+                              {r.heading}
+                            </span>
+                            <div style={{ fontSize:11, color:"#94a3b8", marginTop:4 }}>💡 {r.reason}</div>
+                          </td>
+                          <td style={{ padding:"10px 14px", verticalAlign:"top" }}>
+                            <span style={{ background:"#dbeafe", color:"#1d4ed8", borderRadius:20, padding:"3px 11px", fontSize:12, fontWeight:700, display:"inline-block", lineHeight:1.5 }}>
+                              {r.category}
+                            </span>
+                          </td>
+                          <td style={{ padding:"10px 14px", verticalAlign:"top" }}>
+                            <span style={{ background:confBadge(r.confidence)[0], color:confBadge(r.confidence)[1], borderRadius:20, padding:"3px 10px", fontSize:11, fontWeight:700 }}>
+                              {r.confidence}
+                            </span>
+                          </td>
+                          <td style={{ padding:"10px 14px", verticalAlign:"top" }}>
+                            <button onClick={() => copyHeading(r.heading, i)}
+                              style={{ background:copied===i?"#dcfce7":"#eff6ff", border:`1px solid ${copied===i?"#86efac":"#bfdbfe"}`, color:copied===i?"#16a34a":"#2563eb", borderRadius:8, padding:"5px 12px", cursor:"pointer", fontSize:12, fontWeight:600, whiteSpace:"nowrap" }}>
+                              {copied===i ? "✅ Copied!" : "📋 Copy"}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
